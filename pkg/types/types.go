@@ -35,6 +35,7 @@ type ServerConfig struct {
 	HTTPInterface      string        `json:"http_interface"` // Interface name for HTTP traffic
 	BroadcastPort      int           `json:"broadcast_port"`
 	BroadcastInterface string        `json:"broadcast_interface"` // Interface name for broadcast traffic
+	BroadcastIP        string        `json:"broadcast_ip"`        // Broadcast IP address
 	Timeout            time.Duration `json:"timeout"`
 }
 

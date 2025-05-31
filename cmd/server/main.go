@@ -18,9 +18,11 @@ import (
 
 var (
 	config = types.ServerConfig{
-		HTTPPort:      8080,
-		BroadcastPort: 9999,
-		Timeout:       5 * time.Second,
+		HTTPPort:           8080,
+		BroadcastPort:      9999,
+		Timeout:            5 * time.Second,
+		BroadcastInterface: "",
+		BroadcastIP:        "",
 	}
 
 	clients     = make(map[string]*types.Client)
@@ -71,7 +73,8 @@ func main() {
 	flag.IntVar(&config.HTTPPort, "port", config.HTTPPort, "HTTP server port")
 	flag.StringVar(&config.HTTPInterface, "http-iface", "", "Network interface for HTTP traffic")
 	flag.IntVar(&config.BroadcastPort, "broadcast-port", config.BroadcastPort, "Broadcast port")
-	flag.StringVar(&config.BroadcastInterface, "broadcast-iface", "", "Network interface for broadcast traffic")
+	flag.StringVar(&config.BroadcastInterface, "broadcast-interface", "", "Network interface for broadcast traffic")
+	flag.StringVar(&config.BroadcastIP, "broadcast-ip", "", "Broadcast IP address (e.g., 10.0.0.255)")
 	flag.DurationVar(&config.Timeout, "timeout", config.Timeout, "Broadcast timeout")
 	flag.Parse()
 
@@ -191,7 +194,14 @@ func handleBroadcast(w http.ResponseWriter, r *http.Request) {
 	// Get broadcast interface IP
 	var broadcastIP net.IP
 	var err error
-	if config.BroadcastInterface != "" {
+	if config.BroadcastIP != "" {
+		broadcastIP = net.ParseIP(config.BroadcastIP)
+		if broadcastIP == nil {
+			http.Error(w, fmt.Sprintf("Invalid broadcast IP: %s", config.BroadcastIP), http.StatusInternalServerError)
+			return
+		}
+		log.Printf("Using specified broadcast IP: %s", broadcastIP)
+	} else if config.BroadcastInterface != "" {
 		broadcastIP, err = getInterfaceIP(config.BroadcastInterface)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Failed to get broadcast interface IP: %v", err), http.StatusInternalServerError)
