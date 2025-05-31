@@ -22,7 +22,6 @@ var (
 		BroadcastPort:      9999,
 		Timeout:            5 * time.Second,
 		BroadcastInterface: "",
-		BroadcastIP:        "",
 	}
 
 	clients     = make(map[string]*types.Client)
@@ -68,13 +67,28 @@ func getInterfaceIP(ifaceName string) (net.IP, error) {
 	return nil, fmt.Errorf("no IPv4 address found on interface %s", ifaceName)
 }
 
+// Add this helper function near getInterfaceIP
+func computeBroadcastAddress(ip net.IP, mask net.IPMask) net.IP {
+	// Convert IP to 4-byte representation
+	ip = ip.To4()
+	if ip == nil {
+		return nil
+	}
+
+	// Create broadcast address by ORing IP with inverted mask
+	broadcast := make(net.IP, len(ip))
+	for i := range ip {
+		broadcast[i] = ip[i] | ^mask[i]
+	}
+	return broadcast
+}
+
 func main() {
 	// Parse command line flags
 	flag.IntVar(&config.HTTPPort, "port", config.HTTPPort, "HTTP server port")
 	flag.StringVar(&config.HTTPInterface, "http-iface", "", "Network interface for HTTP traffic")
 	flag.IntVar(&config.BroadcastPort, "broadcast-port", config.BroadcastPort, "Broadcast port")
 	flag.StringVar(&config.BroadcastInterface, "broadcast-interface", "", "Network interface for broadcast traffic")
-	flag.StringVar(&config.BroadcastIP, "broadcast-ip", "", "Broadcast IP address (e.g., 10.0.0.255)")
 	flag.DurationVar(&config.Timeout, "timeout", config.Timeout, "Broadcast timeout")
 	flag.Parse()
 
@@ -191,23 +205,48 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleBroadcast(w http.ResponseWriter, r *http.Request) {
-	// Get broadcast interface IP
+	// Get broadcast interface IP and mask
 	var broadcastIP net.IP
+	var broadcastMask net.IPMask
 	var err error
-	if config.BroadcastIP != "" {
-		broadcastIP = net.ParseIP(config.BroadcastIP)
-		if broadcastIP == nil {
-			http.Error(w, fmt.Sprintf("Invalid broadcast IP: %s", config.BroadcastIP), http.StatusInternalServerError)
-			return
+
+	if config.BroadcastInterface == "" {
+		http.Error(w, "Broadcast interface not specified", http.StatusInternalServerError)
+		return
+	}
+
+	iface, err := net.InterfaceByName(config.BroadcastInterface)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get broadcast interface: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	addrs, err := iface.Addrs()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get interface addresses: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Find the first IPv4 address and its mask
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() && ipnet.IP.To4() != nil {
+			interfaceIP := ipnet.IP
+			broadcastMask = ipnet.Mask
+			// Compute the broadcast address
+			broadcastIP = computeBroadcastAddress(interfaceIP, broadcastMask)
+			if broadcastIP == nil {
+				http.Error(w, "Failed to compute broadcast address", http.StatusInternalServerError)
+				return
+			}
+			log.Printf("Using broadcast interface %s with IP %s, mask %s, broadcast %s",
+				config.BroadcastInterface, interfaceIP, broadcastMask, broadcastIP)
+			break
 		}
-		log.Printf("Using specified broadcast IP: %s", broadcastIP)
-	} else if config.BroadcastInterface != "" {
-		broadcastIP, err = getInterfaceIP(config.BroadcastInterface)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to get broadcast interface IP: %v", err), http.StatusInternalServerError)
-			return
-		}
-		log.Printf("Using broadcast interface %s with IP %s", config.BroadcastInterface, broadcastIP)
+	}
+
+	if broadcastIP == nil {
+		http.Error(w, fmt.Sprintf("No IPv4 address found on interface %s", config.BroadcastInterface), http.StatusInternalServerError)
+		return
 	}
 
 	// Create a new broadcast packet
@@ -245,59 +284,42 @@ func handleBroadcast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update the broadcast address to use the specific interface
-	var broadcastAddr string
-	if broadcastIP != nil {
-		broadcastAddr = fmt.Sprintf("%s:%d", broadcastIP, config.BroadcastPort)
-	} else {
-		broadcastAddr = fmt.Sprintf("255.255.255.255:%d", config.BroadcastPort)
-	}
-
 	// Create a UDP connection on the specific interface
-	var conn net.Conn
-	if broadcastIP != nil {
-		// Create a UDP connection on the specific interface
-		addr := &net.UDPAddr{
-			IP:   broadcastIP,
-			Port: 0, // Let the system choose a port
-		}
-		udpConn, err := net.ListenUDP("udp4", addr)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to create UDP connection: %v", err), http.StatusInternalServerError)
-			return
-		}
-		defer udpConn.Close()
+	addr := &net.UDPAddr{
+		IP:   broadcastIP,
+		Port: 0, // Let the system choose a port
+	}
+	udpConn, err := net.ListenUDP("udp4", addr)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to create UDP connection: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer udpConn.Close()
 
-		// Enable broadcast on the socket
-		file, err := udpConn.File()
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to get socket file: %v", err), http.StatusInternalServerError)
-			return
-		}
-		defer file.Close()
+	// Enable broadcast on the socket
+	file, err := udpConn.File()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get socket file: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer file.Close()
 
-		if err := syscall.SetsockoptInt(int(file.Fd()), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1); err != nil {
-			http.Error(w, fmt.Sprintf("Failed to set broadcast flag: %v", err), http.StatusInternalServerError)
-			return
-		}
-		conn = udpConn
-	} else {
-		// Fall back to default broadcast behavior
-		var err error
-		conn, err = net.Dial("udp4", broadcastAddr)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to dial UDP: %v", err), http.StatusInternalServerError)
-			return
-		}
-		defer conn.Close()
+	if err := syscall.SetsockoptInt(int(file.Fd()), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to set broadcast flag: %v", err), http.StatusInternalServerError)
+		return
 	}
 
-	// Send the broadcast
-	_, err = conn.Write(data)
+	// Set up the destination broadcast address
+	dstAddr := &net.UDPAddr{
+		IP:   broadcastIP,
+		Port: config.BroadcastPort,
+	}
+	_, err = udpConn.WriteTo(data, dstAddr)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to send broadcast: %v", err), http.StatusInternalServerError)
 		return
 	}
+	log.Printf("Broadcast sent to %s:%d", dstAddr.IP, dstAddr.Port)
 
 	// Store the current broadcast
 	broadcastLock.Lock()

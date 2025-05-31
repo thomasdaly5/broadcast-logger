@@ -32,10 +32,9 @@ type BroadcastReport struct {
 // ServerConfig holds the server's configuration
 type ServerConfig struct {
 	HTTPPort           int           `json:"http_port"`
-	HTTPInterface      string        `json:"http_interface"` // Interface name for HTTP traffic
+	HTTPInterface      string        `json:"http_interface,omitempty"`
 	BroadcastPort      int           `json:"broadcast_port"`
-	BroadcastInterface string        `json:"broadcast_interface"` // Interface name for broadcast traffic
-	BroadcastIP        string        `json:"broadcast_ip"`        // Broadcast IP address
+	BroadcastInterface string        `json:"broadcast_interface,omitempty"`
 	Timeout            time.Duration `json:"timeout"`
 }
 
